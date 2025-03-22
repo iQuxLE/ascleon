@@ -1,0 +1,32 @@
+[tool.poetry]
+name = "ascleon"
+version = "0.1.0"
+description = "AI-powered Exomiser results re-ranking agent using four pillars: onset, frequency, exclusions, and diagnostic tests"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+license = "MIT"
+packages = [{include = "ascleon", from = "src"}]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.12"
+pydantic-ai = "0.0.42"
+gradio = "5.22.0"
+click = "^8.0.0"
+logfire = "*"  # Use any available version
+chromadb = "0.5.0"
+requests = "^2.0.0"
+beautifulsoup4 = "^4.0.0"
+pandas = "^2.0.0"
+pyyaml = "^6.0.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.0.0"
+black = "^23.0.0"
+mypy = "^1.0.0"
+
+[tool.poetry.scripts]
+ascleon = "ascleon.cli:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
