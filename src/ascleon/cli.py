@@ -5,6 +5,14 @@ Command line interface for the standalone Exomiser agent.
 import os
 import logging
 import click
+import dotenv
+
+# Load environment variables from .env file
+dotenv.load_dotenv()
+
+# Also set GEMINI_API_KEY from GOOGLE_API_KEY if it exists
+if os.environ.get("GOOGLE_API_KEY") and not os.environ.get("GEMINI_API_KEY"):
+    os.environ["GEMINI_API_KEY"] = os.environ["GOOGLE_API_KEY"]
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +51,11 @@ def main(verbose: int):
 @click.option("--literature/--no-literature", help="Use Literature agent to analyze publication-based diagnostic tests", default=False)
 @click.option("--omim-api-key", help="OMIM API key for accessing the OMIM database", envvar="OMIM_API_KEY")
 @click.option("--multimodal-model", help="Model to use for multimodal analysis", default="gemini-1.5-flash-latest")
+@click.option("--file", help="Specific Exomiser result file to analyze in the UI")
 @click.argument("query", nargs=-1, required=False)
 def exomiser(ui, query, exomiser_path, phenopackets_path, hpoa_path, chromadb_path, 
              comprehensive, omim, literature, omim_api_key, multimodal_model, 
-             model, workdir, share, server_port, **kwargs):
+             model, workdir, share, server_port, file, **kwargs):
     """
     Exomiser Agent for re-ranking disease candidates from Exomiser results using phenopacket data.
     
@@ -103,7 +112,8 @@ def exomiser(ui, query, exomiser_path, phenopackets_path, hpoa_path, chromadb_pa
                 multimodal_model=multimodal_model,
                 comprehensive=comprehensive,
                 use_omim=omim,
-                use_literature=literature
+                use_literature=literature,
+                selected_file=file  # Pass the selected file if provided
             )
             ui.launch(server_port=server_port, share=share)
         else:
@@ -125,9 +135,8 @@ def exomiser(ui, query, exomiser_path, phenopackets_path, hpoa_path, chromadb_pa
         click.echo("Make sure all dependencies are installed.")
     except Exception as e:
         click.echo(f"ERROR: {str(e)}")
-        if verbose:
-            import traceback
-            click.echo(traceback.format_exc())
+        import traceback
+        click.echo(traceback.format_exc())
 
 @main.command()
 @click.option("--model", "-m", help="The model to use for the analysis.")
@@ -167,8 +176,9 @@ def analyze(model, exomiser_path, phenopackets_path, comprehensive, omim, litera
         click.echo(f"Analyzing {filename}...")
         if comprehensive:
             click.echo("Running comprehensive analysis")
-            from ascleon.agents.exomiser.exomiser_tools import comprehensive_analysis
-            result = run_sync(lambda: comprehensive_analysis.run_sync(deps=deps, exomiser_filename=filename))
+            from ascleon.agents.exomiser.exomiser_agent import exomiser_agent
+            result = run_sync(lambda: exomiser_agent.run_sync(f"Perform comprehensive analysis on Exomiser file: {filename}", deps=deps))
+            result = result.data
             
             # Print phenotype information
             click.echo("\n=== Patient Information ===")
@@ -194,8 +204,9 @@ def analyze(model, exomiser_path, phenopackets_path, comprehensive, omim, litera
             click.echo(result["reranking_results"]["model_explanation"])
             
         else:
-            from ascleon.agents.exomiser.exomiser_tools import perform_reranking
-            result = run_sync(lambda: perform_reranking.run_sync(deps=deps, exomiser_filename=filename))
+            from ascleon.agents.exomiser.exomiser_agent import exomiser_agent
+            result = run_sync(lambda: exomiser_agent.run_sync(f"Analyze Exomiser results from file: {filename}", deps=deps))
+            result = result.data
             
             # Print reranking results
             click.echo("\n=== Reranking Results ===")
@@ -233,7 +244,9 @@ def list(exomiser_path):
         deps = get_config()
         
         click.echo(f"Looking for Exomiser results in: {exomiser_path}")
-        results = run_sync(lambda: list_exomiser_results.run_sync(deps=deps))
+        from ascleon.agents.exomiser.exomiser_agent import exomiser_agent
+        result = run_sync(lambda: exomiser_agent.run_sync("List all available Exomiser result files", deps=deps))
+        results = result.data
         
         if results:
             click.echo("\nAvailable Exomiser result files:")
@@ -241,6 +254,81 @@ def list(exomiser_path):
                 click.echo(f"{i}. {filename}")
         else:
             click.echo("No Exomiser result files found.")
+            
+    except Exception as e:
+        click.echo(f"ERROR: {str(e)}")
+        import traceback
+        click.echo(traceback.format_exc())
+
+@main.command()
+@click.option("--exomiser-path", help="Path to the directory containing Exomiser results", required=True)
+@click.argument("filename", required=True)
+def simple_view(exomiser_path, filename):
+    """
+    Simple view of a specific Exomiser result file without complex analysis.
+    
+    This command displays the contents of the specified Exomiser result file
+    in a simple format without performing any complex analysis.
+    
+    Example: ascleon simple_view --exomiser-path data/exomiser_results PMID_10571775_KSN-II-1-pheval_disease_result.tsv
+    """
+    try:
+        import csv
+        from pathlib import Path
+        
+        # Find the result file
+        results_path = Path(exomiser_path)
+        possible_paths = [
+            results_path / filename,
+            results_path / "pheval_disease_result" / filename,
+            results_path / "pheval_disease_results" / filename
+        ]
+        
+        file_path = None
+        for path in possible_paths:
+            if path.exists():
+                file_path = path
+                break
+                
+        if not file_path:
+            # Try a recursive search
+            matches = list(results_path.glob(f"**/{filename}"))
+            if matches:
+                file_path = matches[0]
+        
+        if not file_path or not file_path.exists():
+            click.echo(f"ERROR: Could not find {filename}")
+            return
+            
+        click.echo(f"Found file at: {file_path}")
+        
+        # Read the file
+        results = []
+        with open(file_path, 'r') as f:
+            reader = csv.DictReader(f, delimiter='\t')
+            for row in reader:
+                results.append(dict(row))
+        
+        if not results:
+            click.echo(f"File {filename} is empty")
+            return
+            
+        # Display the top 10 results
+        click.echo("\n=== Top Disease Candidates ===")
+        for i, result in enumerate(results[:10], 1):
+            # Check for different possible column names in the file
+            rank = result.get("rank", str(i))
+            score = result.get("score", result.get("COMBINED_SCORE", "0"))
+            
+            disease_name = result.get("disease_name", 
+                                    result.get("DISEASE_NAME", "Unknown"))
+            
+            disease_id = result.get("disease_identifier", 
+                                 result.get("DISEASE_ID", "Unknown"))
+            
+            click.echo(f"{rank}. {disease_name} ({disease_id})")
+            click.echo(f"   Score: {score}")
+            click.echo("")
             
     except Exception as e:
         click.echo(f"ERROR: {str(e)}")

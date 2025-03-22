@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 
-import pydantic_ai
 from pydantic_ai import RunContext, ModelRetry
 
 from ascleon.agents.exomiser.exomiser_config import ExomiserDependencies
@@ -311,7 +310,7 @@ async def rerank_exomiser_results(
     phenotype_data: Dict[str, Any]
 ) -> Dict[str, Any]:
     """
-    Use an AI model to rerank Exomiser results based on phenopacket data.
+    Let the agent rerank Exomiser results based on phenopacket data.
     
     Args:
         ctx: The run context with Exomiser configuration
@@ -321,7 +320,7 @@ async def rerank_exomiser_results(
     Returns:
         Dict[str, Any]: Reranked Exomiser results
     """
-    # Prepare the data for the model
+    # Prepare the data for processing
     top_results = exomiser_results[:10]  # Use top 10 results for reranking
     
     # Format phenotype information
@@ -342,59 +341,29 @@ async def rerank_exomiser_results(
     else:
         excluded_text = "- No explicitly excluded phenotypes"
     
-    # Create a prompt for the model
-    prompt = f"""
-I need you to rerank these disease candidates based on their compatibility with the patient's phenotypes and onset information.
-
-PATIENT INFORMATION:
-- ID: {phenotype_data['id']}
-- Phenotypes present: {included_phenotypes_text}
-{onset_text}
-{excluded_text}
-
-DISEASE CANDIDATES (Original ranking):
-{", ".join([f"{i+1}. {result.get('DISEASE_NAME', 'Unknown')} ({result.get('DISEASE_ID', 'Unknown')})" for i, result in enumerate(top_results)])}
-
-Please rerank these disease candidates based on their compatibility with the patient's phenotypes AND especially the onset information.
-
-Your response should only include the reranked list from 1 to 10 in this exact format:
-
-1. [Disease Name] ([Disease ID])
-2. [Disease Name] ([Disease ID])
-...
-10. [Disease Name] ([Disease ID])
-
-You may also suggest other diseases not in the original list if appropriate, listing them after the reranked list.
-"""
+    # Format disease candidates
+    disease_candidates = [
+        {
+            "rank": i+1,
+            "name": result.get('DISEASE_NAME', 'Unknown'),
+            "id": result.get('DISEASE_ID', 'Unknown')
+        } 
+        for i, result in enumerate(top_results)
+    ]
     
-    # Use the model to rerank
-    model_result = await pydantic_ai.chat.completions.create(
-        model=ctx.deps.model,
-        messages=[
-            {"role": "system", "content": "You are a clinical geneticist expert in rare disease diagnosis. Your task is to rerank disease candidates based on phenotypic features and disease onset."},
-            {"role": "user", "content": prompt}
-        ],
-        max_tokens=1000
-    )
-    
-    response_text = model_result.choices[0].message.content
-    
-    # Parse the model's response to extract the reranked list
-    lines = response_text.strip().split('\n')
-    reranked_results = []
-    
-    for line in lines:
-        line = line.strip()
-        if line and line[0].isdigit() and '. ' in line:
-            # This looks like a ranked result
-            rank_text = line.split('. ', 1)[1]
-            reranked_results.append({"rank": len(reranked_results) + 1, "description": rank_text})
-    
-    # Return the reranked results along with the model's full explanation
-    return {
-        "reranked_list": reranked_results[:10],  # Ensure we only return top 10
-        "model_explanation": response_text
+    # Create a structured input for the agent to process
+    reranking_request = {
+        "patient_info": {
+            "id": phenotype_data['id'],
+            "phenotypes": included_phenotypes_text,
+            "onset": onset_text,
+            "exclusions": excluded_text
+        },
+        "disease_candidates": disease_candidates
     }
+    
+    # Return the structured data for the agent to process
+    return reranking_request
 
 
 async def get_result_and_phenopacket(
@@ -424,6 +393,7 @@ async def get_result_and_phenopacket(
         "exomiser_filename": exomiser_filename,
         "exomiser_results": exomiser_results,
         "phenopacket_filename": phenopacket_filename,
+        "phenopacket_data": phenopacket_data,
         "phenotype_data": phenotype_data
     }
 
@@ -438,7 +408,7 @@ async def perform_reranking(
     This function coordinates the basic reranking process:
     1. Gets Exomiser results and matching phenopacket
     2. Extracts phenotype data
-    3. Performs basic reranking using onset information
+    3. Prepares the data for reranking
     
     For more comprehensive analysis with HPOA data, frequency information,
     and excluded phenotypes, use the comprehensive_analysis function.
@@ -453,13 +423,13 @@ async def perform_reranking(
           - phenopacket_filename: Matching phenopacket filename
           - original_results: Top 10 original Exomiser results
           - phenotype_data: Extracted phenotype information
-          - reranking_results: Reranked disease list with explanation
+          - reranking_request: Structured data for reranking
     """
     # Get combined data
     combined_data = await get_result_and_phenopacket(ctx, exomiser_filename)
     
-    # Perform the reranking
-    reranking_results = await rerank_exomiser_results(
+    # Prepare the reranking request
+    reranking_request = await rerank_exomiser_results(
         ctx, 
         combined_data["exomiser_results"],
         combined_data["phenotype_data"]
@@ -471,7 +441,7 @@ async def perform_reranking(
         "phenopacket_filename": combined_data["phenopacket_filename"],
         "original_results": combined_data["exomiser_results"][:10],
         "phenotype_data": combined_data["phenotype_data"],
-        "reranking_results": reranking_results
+        "reranking_request": reranking_request
     }
 
 
@@ -709,12 +679,12 @@ async def analyze_with_literature(
         
         # Try to get full text first, but fall back to abstract if that fails
         try:
-            article_text = await lookup_pmid(f"PMID:{pmid}")
+            article_text = await lookup_pmid(RunContext(deps=ctx.deps.literature), f"PMID:{pmid}")
             print(f"Retrieved full text for PMID:{pmid}")
         except Exception:
             # If full text fails, try just the abstract
             try:
-                article_text = await get_article_abstract(f"PMID:{pmid}")
+                article_text = await get_article_abstract(RunContext(deps=ctx.deps.literature), f"PMID:{pmid}")
                 print(f"Retrieved abstract for PMID:{pmid}")
             except Exception as e:
                 print(f"Error retrieving article for PMID:{pmid}: {str(e)}")
@@ -734,71 +704,11 @@ async def analyze_with_literature(
                 "name": disease.get("DISEASE_NAME", "Unknown")
             })
         
-        # Create a prompt to extract diagnostic test recommendations
-        import pydantic_ai
-        
-        # Add System Prompt
-        prompt_system = "You are an expert in clinical genetics and diagnostic medicine. Your task is to extract diagnostic test recommendations from scientific literature that would help confirm or rule out specific genetic disease diagnoses."
-        
-        # Create User Prompt
-        prompt_user = f"""
-I have a patient with a suspected rare genetic disease, and I need to identify diagnostic tests that could help confirm or exclude the candidate diseases.
-I need you to analyze the following article and extract explicit diagnostic test recommendations.
-
-CANDIDATE DISEASES (in order of initial ranking):
-{", ".join([f"{d['rank']}. {d['name']} ({d['id']})" for d in disease_info])}
-
-ARTICLE TEXT:
-{article_text[:12000]}  # Truncate text if too long
-
-Please provide:
-1. A list of all diagnostic tests mentioned in this article that could be useful for diagnosis
-2. For each of the candidate diseases, identify which specific tests would be most informative
-3. Indicate how each recommended test might help confirm or exclude a diagnosis
-
-Format your response as structured information that can be easily parsed. Be specific about test names, methodologies, and how they relate to specific diseases.
-"""
-
-        # Use the model to extract test recommendations
-        model_result = await pydantic_ai.chat.completions.create(
-            model=ctx.deps.model,
-            messages=[
-                {"role": "system", "content": prompt_system},
-                {"role": "user", "content": prompt_user}
-            ],
-            max_tokens=1500
-        )
-        
-        response_text = model_result.choices[0].message.content
-        
-        # Process the extracted recommendations
-        extracted_tests = []
-        disease_specific_tests = {}
-        
-        # Simple logic to extract structured information from the model response
-        # In a real implementation, this would use proper parsing logic or a structured schema
-        
-        # Try to parse the model's response into structured sections
-        sections = response_text.split("\n\n")
-        for section in sections:
-            if "diagnostic test" in section.lower() or "recommended test" in section.lower():
-                extracted_tests.append(section.strip())
-            
-            # Check for disease-specific test recommendations
-            for disease in disease_info:
-                disease_id = disease["id"]
-                disease_name = disease["name"]
-                
-                if disease_id in section or disease_name in section:
-                    if disease_id not in disease_specific_tests:
-                        disease_specific_tests[disease_id] = []
-                    disease_specific_tests[disease_id].append(section.strip())
-        
+        # Return the article text and disease info for the agent to process
         return {
             "pmid": pmid,
-            "article_analysis": response_text,
-            "test_recommendations": extracted_tests,
-            "disease_specific_tests": disease_specific_tests
+            "article_text": article_text[:12000],  # Truncate if too long
+            "disease_info": disease_info
         }
         
     except Exception as e:
@@ -824,7 +734,7 @@ async def comprehensive_analysis(
     3. Uses HPO agent to get enriched phenotype definitions
     4. Uses OMIM agent to get enhanced onset information (if enabled)
     5. Uses Literature agent to extract diagnostic test recommendations (if enabled)
-    6. Reranks diseases using all available information
+    6. Provides all data for reranking
     
     The analysis focuses on the four key pillars:
     - Age of onset from phenopackets and OMIM
@@ -843,7 +753,6 @@ async def comprehensive_analysis(
           - hpo_analysis: Enriched phenotype definitions from HPO agent
           - omim_analysis: OMIM onset data (if enabled)
           - literature_analysis: Literature-based diagnostic test recommendations (if enabled)
-          - reranking_results: Final reranking with comprehensive explanation
     """
     # Step 1: Get base Exomiser results and phenopacket
     base_data = await get_result_and_phenopacket(ctx, exomiser_filename)
@@ -883,37 +792,25 @@ async def comprehensive_analysis(
             base_data["exomiser_results"]
         )
     
-    # Step 6: Perform comprehensive reranking with all collected data
-    full_context = {
-        "exomiser_results": base_data["exomiser_results"],
+    # Step 6: Prepare comprehensive reranking data
+    comprehensive_context = {
+        "exomiser_results": base_data["exomiser_results"][:10],  # Top 10 results
         "phenotype_data": base_data["phenotype_data"],
-        "phenotype_frequencies": hpoa_analysis["phenotype_frequencies"],
-        "excluded_phenotype_frequencies": hpoa_analysis["excluded_phenotype_frequencies"],
-        "disease_analyses": hpoa_analysis["disease_analyses"],
-        "enriched_phenotypes": hpo_analysis,
-        "omim_onset": omim_analysis,
+        "hpoa_analysis": hpoa_analysis,
+        "hpo_analysis": hpo_analysis,
+        "omim_analysis": omim_analysis,
         "literature_analysis": literature_analysis
     }
     
-    reranking_results = await comprehensive_reranking_with_exclusions(ctx, full_context)
-    
-    # Return the complete results
-    result = {
+    # Return the complete results for the agent to process
+    return {
         "original_data": base_data,
         "hpoa_analysis": hpoa_analysis,
         "hpo_analysis": hpo_analysis,
-        "reranking_results": reranking_results
+        "omim_analysis": omim_analysis if omim_analysis else None,
+        "literature_analysis": literature_analysis if literature_analysis else None,
+        "comprehensive_context": comprehensive_context
     }
-    
-    # Add OMIM analysis if available
-    if omim_analysis:
-        result["omim_analysis"] = omim_analysis
-    
-    # Add literature analysis if available
-    if literature_analysis:
-        result["literature_analysis"] = literature_analysis
-    
-    return result
 
 
 async def comprehensive_reranking_with_exclusions(
@@ -921,16 +818,16 @@ async def comprehensive_reranking_with_exclusions(
     full_context: Dict[str, Any]
 ) -> Dict[str, Any]:
     """
-    Enhanced reranking using all available information from multiple agents.
+    Prepare comprehensive data for reranking by the agent.
     
-    This function creates a comprehensive prompt for the LLM that includes:
+    This function organizes all multi-agent data for the agent to perform reranking:
     1. Basic phenotype information with enriched definitions from HPO
     2. Excluded phenotype details with enhanced HPO definitions
     3. Disease-phenotype compatibility analysis including exclusion conflicts
     4. Frequency data for phenotypes across diseases
     5. Diagnostic test recommendations from literature
     
-    The LLM then reranks diseases with special emphasis on:
+    The agent will then rerank diseases with special emphasis on:
     1. Exclusion conflicts - phenotypes expected in a disease but excluded in the patient
     2. Age of onset compatibility
     3. Phenotype frequency in diseases
@@ -941,226 +838,122 @@ async def comprehensive_reranking_with_exclusions(
         full_context: All collected data from various agents
         
     Returns:
-        Dict[str, Any]: Reranking results with detailed explanation of reasoning
+        Dict[str, Any]: Structured data for reranking
     """
     # Extract key data
     exomiser_results = full_context["exomiser_results"]
     phenotype_data = full_context["phenotype_data"]
-    top_results = exomiser_results[:10]
-    enriched_phenotypes = full_context.get("enriched_phenotypes", {})
+    hpo_analysis = full_context.get("hpo_analysis", {})
     
-    # Prepare formatted strings for the prompt
-    included_phenotypes_text_parts = []
+    # Format phenotypes with enriched definitions
+    included_phenotypes = []
     for p in phenotype_data['included_phenotypes']:
         phenotype_id = p['id']
-        phenotype_text = f"{p['label']} ({phenotype_id})"
+        phenotype_info = {
+            "id": phenotype_id,
+            "label": p['label']
+        }
         # Add enriched definition if available
-        if phenotype_id in enriched_phenotypes:
-            definition = enriched_phenotypes[phenotype_id].get("definition", "").strip()
+        if phenotype_id in hpo_analysis:
+            definition = hpo_analysis[phenotype_id].get("definition", "").strip()
             if definition and definition != "No definition available":
                 # Truncate long definitions
                 if len(definition) > 100:
                     definition = definition[:100] + "..."
-                phenotype_text += f" - {definition}"
-        included_phenotypes_text_parts.append(phenotype_text)
-    
-    included_phenotypes_text = "\n  * " + "\n  * ".join(included_phenotypes_text_parts)
-    
-    # Format onset information
-    if phenotype_data.get('onset'):
-        onset_text = f"- Disease onset: {phenotype_data['onset']['label']} ({phenotype_data['onset']['id']})"
-    else:
-        onset_text = "- Disease onset: Not specified"
+                phenotype_info["definition"] = definition
+        included_phenotypes.append(phenotype_info)
     
     # Format excluded phenotypes with enriched definitions
-    excluded_text = "- EXCLUDED phenotypes: "
-    if phenotype_data.get('excluded_phenotypes'):
-        excluded_phenotypes_text_parts = []
-        for p in phenotype_data.get('excluded_phenotypes', []):
-            phenotype_id = p['id']
-            phenotype_text = f"{p['label']} ({phenotype_id})"
-            # Add enriched definition if available
-            if phenotype_id in enriched_phenotypes:
-                definition = enriched_phenotypes[phenotype_id].get("definition", "").strip()
-                if definition and definition != "No definition available":
-                    # Truncate long definitions
-                    if len(definition) > 100:
-                        definition = definition[:100] + "..."
-                    phenotype_text += f" - {definition}"
-            excluded_phenotypes_text_parts.append(phenotype_text)
-        excluded_text += "\n  * " + "\n  * ".join(excluded_phenotypes_text_parts)
-    else:
-        excluded_text += "None"
+    excluded_phenotypes = []
+    for p in phenotype_data.get('excluded_phenotypes', []):
+        phenotype_id = p['id']
+        phenotype_info = {
+            "id": phenotype_id,
+            "label": p['label']
+        }
+        # Add enriched definition if available
+        if phenotype_id in hpo_analysis:
+            definition = hpo_analysis[phenotype_id].get("definition", "").strip()
+            if definition and definition != "No definition available":
+                # Truncate long definitions
+                if len(definition) > 100:
+                    definition = definition[:100] + "..."
+                phenotype_info["definition"] = definition
+        excluded_phenotypes.append(phenotype_info)
     
-    # Add phenotype relationship analysis if available
-    phenotype_analysis_text = ""
-    if "__analysis" in enriched_phenotypes:
-        analysis = enriched_phenotypes["__analysis"]
-        
-        # Add information about common ancestors
-        common_ancestors = analysis.get("common_ancestors", [])
-        if common_ancestors:
-            phenotype_analysis_text += "\nPHENOTYPE RELATIONSHIP ANALYSIS:\n"
-            phenotype_analysis_text += "- Common ancestors/parent terms shared by multiple phenotypes:\n"
-            for ancestor in common_ancestors[:3]:  # Limit to top 3
-                phenotype_analysis_text += f"  * {ancestor.get('label', 'Unknown')} ({ancestor.get('id', 'Unknown')})\n"
-        
-        # Add information about phenotype clusters
-        clusters = analysis.get("phenotype_clusters", {})
-        if clusters:
-            phenotype_analysis_text += "- Phenotype clusters (groups of related phenotypes):\n"
-            for cluster_name, cluster_phenotypes in list(clusters.items())[:2]:  # Limit to top 2 clusters
-                phenotype_analysis_text += f"  * {cluster_name}: "
-                phenotype_analysis_text += ", ".join([f"{p.get('label', 'Unknown')} ({p.get('id', 'Unknown')})" 
-                                                 for p in cluster_phenotypes])
-                phenotype_analysis_text += "\n"
+    # Format disease candidates
+    disease_candidates = []
+    for i, result in enumerate(exomiser_results[:10]):  # Top 10 results
+        disease_info = {
+            "rank": i + 1,
+            "id": result.get("DISEASE_ID", "Unknown"),
+            "name": result.get("DISEASE_NAME", "Unknown"),
+            "score": result.get("COMBINED_SCORE", result.get("score", "Unknown"))
+        }
+        disease_candidates.append(disease_info)
     
-    # Build enhanced prompt incorporating all data with focus on excluded phenotypes
-    prompt = f"""
-I need you to rerank these disease candidates based on their compatibility with the patient's phenotypes and additional information, with special attention to EXCLUDED phenotypes.
-
-PATIENT INFORMATION:
-- ID: {phenotype_data['id']}
-- Phenotypes present: {included_phenotypes_text}
-{onset_text}
-{excluded_text}
-{phenotype_analysis_text}
-"""
+    # Format phenotype analysis if available
+    phenotype_analysis = None
+    if "__analysis" in hpo_analysis:
+        analysis = hpo_analysis["__analysis"]
+        if analysis:
+            phenotype_analysis = {
+                "common_ancestors": analysis.get("common_ancestors", []),
+                "phenotype_clusters": analysis.get("phenotype_clusters", {})
+            }
     
-    # Add disease analysis data with focus on exclusion conflicts
-    if "disease_analyses" in full_context:
-        prompt += "\nDISEASE-PHENOTYPE ANALYSIS (including exclusion conflicts):\n"
-        for analysis in full_context.get("disease_analyses", []):
+    # Format disease-phenotype compatibility data
+    disease_analysis = []
+    if "disease_analyses" in full_context.get("hpoa_analysis", {}):
+        for analysis in full_context["hpoa_analysis"]["disease_analyses"]:
             disease_id = analysis["disease_id"]
-            prompt += f"\n{disease_id}:\n"
-            prompt += f"- Matching phenotypes: {len(analysis['overlapping_phenotypes'])}/{len(phenotype_data['included_phenotypes'])}\n"
-            prompt += f"- Missing expected phenotypes: {len(analysis['missing_phenotypes'])}\n"
-            prompt += f"- Unexpected phenotypes: {len(analysis['unexpected_phenotypes'])}\n"
-            
-            # Highlight exclusion conflicts specifically
-            exclusion_conflicts = analysis.get("exclusion_conflicts", [])
-            if exclusion_conflicts:
-                prompt += f"- EXCLUSION CONFLICTS: {len(exclusion_conflicts)} excluded phenotypes that typically occur in this disease\n"
-                conflict_labels = []
-                for pheno_id in exclusion_conflicts:
-                    # Try to get the label for this phenotype
-                    label = next((p["label"] for p in phenotype_data["excluded_phenotypes"] if p["id"] == pheno_id), pheno_id)
-                    conflict_labels.append(f"{label} ({pheno_id})")
-                prompt += f"  - Conflicts: {', '.join(conflict_labels)}\n"
-            else:
-                prompt += f"- EXCLUSION CONFLICTS: None (good!)\n"
-            
-            prompt += f"- Adjusted score (accounting for exclusions): {analysis.get('adjusted_score', 0):.2f}\n"
-            
-            # Add OMIM onset information if available
-            if "omim_onset" in full_context and full_context["omim_onset"]:
-                onset_compatibility = full_context["omim_onset"].get("onset_compatibility", {})
-                if disease_id in onset_compatibility:
-                    onset_info = onset_compatibility[disease_id]
-                    prompt += f"- OMIM onset: {onset_info.get('disease_onset', 'Unknown')}\n"
-                    prompt += f"- Onset compatibility: {onset_info.get('compatibility', 'Unknown')} (score: {onset_info.get('score', 0):.2f})\n"
+            disease_compatibility = {
+                "id": disease_id,
+                "matching_phenotypes": len(analysis['overlapping_phenotypes']),
+                "total_patient_phenotypes": len(phenotype_data['included_phenotypes']),
+                "missing_expected_phenotypes": len(analysis['missing_phenotypes']),
+                "unexpected_phenotypes": len(analysis['unexpected_phenotypes']),
+                "exclusion_conflicts": analysis.get('exclusion_conflicts', []),
+                "adjusted_score": analysis.get('adjusted_score', 0)
+            }
+            disease_analysis.append(disease_compatibility)
     
-    # Add phenotype frequency data
-    if "phenotype_frequencies" in full_context:
-        prompt += "\nPHENOTYPE FREQUENCY DATA:\n"
-        for phenotype_id, frequencies in full_context.get("phenotype_frequencies", {}).items():
-            phenotype_label = next((p["label"] for p in phenotype_data["included_phenotypes"] if p["id"] == phenotype_id), phenotype_id)
-            prompt += f"\n{phenotype_label} ({phenotype_id}):\n"
-            
-            # Add frequencies for top diseases only to keep prompt manageable
-            relevant_diseases = [r.get("DISEASE_ID") for r in top_results]
-            relevant_freqs = {k: v for k, v in frequencies.items() if k in relevant_diseases}
-            
-            if relevant_freqs:
-                for disease_id, freq in relevant_freqs.items():
-                    prompt += f"- {disease_id}: {freq.get('label', 'Unknown')}\n"
-            else:
-                prompt += "- No frequency data available for top candidate diseases\n"
+    # Format onset information
+    onset_info = {}
+    if "omim_analysis" in full_context and full_context["omim_analysis"]:
+        onset_compatibility = full_context["omim_analysis"].get("onset_compatibility", {})
+        if onset_compatibility:
+            for disease_id, info in onset_compatibility.items():
+                onset_info[disease_id] = {
+                    "disease_onset": info.get("disease_onset", "Unknown"),
+                    "compatibility": info.get("compatibility", "Unknown"),
+                    "score": info.get("score", 0)
+                }
     
-    # Add diagnostic test recommendations from literature
-    literature_text = ""
-    if "literature_analysis" in full_context and full_context.get("literature_analysis"):
-        literature_data = full_context["literature_analysis"]
-        
-        if "pmid" in literature_data and literature_data["pmid"]:
-            literature_text += f"\nDIAGNOSTIC TEST RECOMMENDATIONS FROM LITERATURE (PMID:{literature_data['pmid']}):\n"
-            
-            # General test recommendations
-            if "test_recommendations" in literature_data and literature_data["test_recommendations"]:
-                literature_text += "\nGeneral test recommendations:\n"
-                for i, test in enumerate(literature_data["test_recommendations"][:5]):  # Limit to 5 tests
-                    literature_text += f"- {test}\n"
-            
-            # Disease-specific test recommendations
-            if "disease_specific_tests" in literature_data and literature_data["disease_specific_tests"]:
-                literature_text += "\nDisease-specific test recommendations:\n"
-                for disease_id, tests in literature_data["disease_specific_tests"].items():
-                    disease_name = next((r.get("DISEASE_NAME", "Unknown") for r in top_results if r.get("DISEASE_ID") == disease_id), "Unknown")
-                    literature_text += f"\n{disease_name} ({disease_id}):\n"
-                    for test in tests[:2]:  # Limit to 2 tests per disease
-                        literature_text += f"- {test}\n"
+    # Format literature data
+    literature_info = None
+    if "literature_analysis" in full_context and full_context["literature_analysis"]:
+        lit_data = full_context["literature_analysis"]
+        if "pmid" in lit_data and lit_data["pmid"]:
+            literature_info = {
+                "pmid": lit_data["pmid"],
+                "article_text": lit_data.get("article_text", ""),
+                "disease_info": lit_data.get("disease_info", [])
+            }
     
-    prompt += literature_text
-    
-    # Add disease candidates for reranking
-    prompt += f"""
-DISEASE CANDIDATES (Original ranking):
-{", ".join([f"{i+1}. {result.get('DISEASE_NAME', 'Unknown')} ({result.get('DISEASE_ID', 'Unknown')})" for i, result in enumerate(top_results)])}
-
-Please rerank these disease candidates with special attention to these FIVE KEY FACTORS in order of importance:
-
-1. EXCLUDED PHENOTYPES - Diseases that typically present with phenotypes explicitly excluded in this patient should be ranked lower or eliminated
-2. AGE OF ONSET - Compatibility with the patient's disease onset information
-3. PHENOTYPE FREQUENCY - How common each phenotype is in each disease
-4. PHENOTYPE OVERLAP - How well the patient's phenotypes match the disease's typical presentation
-5. DIAGNOSTIC TESTS - Available diagnostic tests that could confirm specific diagnoses
-
-Your response should include the reranked list from 1 to 10 in this exact format:
-
-1. [Disease Name] ([Disease ID])
-2. [Disease Name] ([Disease ID])
-...
-10. [Disease Name] ([Disease ID])
-
-After the list, provide detailed reasoning explaining your reranking decisions.
-For each of the top 5 diseases, explicitly address:
-- How the excluded phenotypes influenced your ranking (this is most important)
-- How the onset information affected the ranking
-- How frequency data informed your decision
-- How the phenotype overlap impacted your assessment
-- What diagnostic tests would be most helpful in confirming the diagnosis
-"""
-    
-    # Use the model to rerank with all data
-    model_result = await pydantic_ai.chat.completions.create(
-        model=ctx.deps.model,
-        messages=[
-            {"role": "system", "content": "You are a clinical geneticist expert in rare disease diagnosis. Your task is to rerank disease candidates based on phenotypic features, with special emphasis on excluded phenotypes, disease onset, frequency data, and diagnostic test availability."},
-            {"role": "user", "content": prompt}
-        ],
-        max_tokens=2000
-    )
-    
-    response_text = model_result.choices[0].message.content
-    
-    # Parse the model's response to extract the reranked list
-    lines = response_text.strip().split('\n')
-    reranked_results = []
-    
-    for line in lines:
-        line = line.strip()
-        if line and line[0].isdigit() and '. ' in line:
-            # This looks like a ranked result
-            rank_text = line.split('. ', 1)[1]
-            reranked_results.append({"rank": len(reranked_results) + 1, "description": rank_text})
-    
-    # Separate reasoning from results list
-    reasoning_text = response_text
-    for result in reranked_results:
-        reasoning_text = reasoning_text.replace(f"{result['rank']}. {result['description']}", "")
-    reasoning_text = reasoning_text.strip()
-    
-    return {
-        "reranked_list": reranked_results[:10],  # Ensure we only return top 10
-        "model_explanation": reasoning_text
+    # Prepare comprehensive reranking context
+    reranking_context = {
+        "patient": {
+            "id": phenotype_data['id'],
+            "included_phenotypes": included_phenotypes,
+            "excluded_phenotypes": excluded_phenotypes,
+            "onset": phenotype_data.get('onset')
+        },
+        "disease_candidates": disease_candidates,
+        "phenotype_analysis": phenotype_analysis,
+        "disease_analysis": disease_analysis,
+        "onset_info": onset_info,
+        "literature_info": literature_info
     }
+    
+    return reranking_context

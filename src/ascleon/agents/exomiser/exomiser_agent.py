@@ -43,25 +43,34 @@ BASIC ANALYSIS:
 - `read_exomiser_result` to retrieve data from a specific Exomiser file
 - `find_matching_phenopacket` to get the corresponding phenopacket
 - `extract_phenotypes_from_phenopacket` to get structured phenotype data
-- `rerank_exomiser_results` for basic reranking using onset information
+- `rerank_exomiser_results` for basic reranking using provided data
 - `perform_reranking` for simple workflow execution
 
 COMPREHENSIVE ANALYSIS:
 - `analyze_with_hpoa` to get phenotype frequency data and disease compatibility analysis
 - `comprehensive_analysis` to perform full multi-agent analysis
-- `comprehensive_reranking_with_exclusions` for advanced reranking with all data
+- `comprehensive_reranking_with_exclusions` for advanced reranking preparation
 
-When performing comprehensive analysis:
+When performing reranking, follow these steps:
 1. Look for excluded phenotypes that conflict with disease expectations
 2. Check disease onset compatibility with patient's presentation
 3. Analyze phenotype frequency in disease candidates
 4. Consider the overall phenotype match
 
 Present reranking results with clear explanations for why diseases were moved up or down.
+
+Your task is to analyze the Exomiser results and produce a re-ranked list by considering:
+1. Patient's phenotype data (including excluded phenotypes)
+2. Age of onset
+3. Phenotype frequency in diseases
+4. Literature evidence
+
+When analyzing a reranking_request, I'll provide a numbered list (1-10) of re-ranked disease candidates with my reasoning.
+For comprehensive analysis results, I'll provide detailed explanations for each ranking change.
 """
 
 exomiser_agent = Agent(
-    model="openai:gpt-4o",  # Default model, will be overridden by ExomiserDependencies.model
+    model="openai:gpt-4o",  # Default to GPT-4o
     deps_type=ExomiserDependencies,
     system_prompt=SYSTEM,
     tools=[

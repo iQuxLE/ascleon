@@ -119,7 +119,12 @@ def get_config() -> ExomiserDependencies:
     collection_name = os.environ.get("CHROMADB_COLLECTION", "enhanced_lrd_hpo_large3")
     
     # Get model settings
-    model = os.environ.get("EXOMISER_MODEL", "claude-3-opus-20240229")
+    # Explicitly support Gemini models
+    model_name = os.environ.get("EXOMISER_MODEL", "claude-3-opus-20240229")
+    if model_name.startswith("gemini"):
+        model = f"google:{model_name}"
+    else:
+        model = model_name
     multimodal_model = os.environ.get("EXOMISER_MULTIMODAL_MODEL", "gemini-1.5-flash-latest")
     
     # Get analysis options
@@ -146,8 +151,7 @@ def get_config() -> ExomiserDependencies:
     )
     
     literature_deps = LiteratureDependencies(
-        workdir=workdir,
-        model=os.environ.get("LITERATURE_MODEL", model)
+        workdir=workdir
     )
     
     return ExomiserDependencies(
