@@ -63,23 +63,74 @@ def chat(
     deps.use_omim = use_omim
     deps.use_literature = use_literature
     
-    # Function to get available Exomiser files for the dropdown
+    # Function to get available Exomiser files for the dropdown without using the agent
     def get_exomiser_files():
-        # Skip API call if we already have a pre-selected file
+        # Skip file listing if we already have a pre-selected file
         if selected_file:
             return [selected_file]
             
         try:
-            # Use the agent to list the files
-            result = run_sync(lambda: exomiser_agent.run_sync("List all available Exomiser result files", deps=deps))
-            return result.data
+            # Directly list files from the filesystem
+            from pathlib import Path
+            
+            # Find in the exomiser path
+            results_path = Path(deps.exomiser_results_path)
+            
+            # Check for pheval_disease_result or pheval_disease_results directories
+            pheval_paths = [
+                results_path / "pheval_disease_result",
+                results_path / "pheval_disease_results"
+            ]
+            
+            # Try each potential pheval directory
+            tsv_files = []
+            
+            for pheval_path in pheval_paths:
+                if pheval_path.exists():
+                    files = [f.name for f in pheval_path.glob("**/*.tsv") if f.is_file()]
+                    if files:
+                        print(f"Found {len(files)} files in {pheval_path}")
+                        tsv_files = files
+                        break
+            
+            # If no pheval directories found or they're empty, look in base directory
+            if not tsv_files:
+                files = [f.name for f in results_path.glob("**/*.tsv") if f.is_file()]
+                if files:
+                    print(f"Found {len(files)} files in {results_path}")
+                    tsv_files = files
+            
+            if tsv_files:
+                # Limit to first 500 files if very large to prevent UI issues
+                if len(tsv_files) > 500:
+                    tsv_files = tsv_files[:500]
+                    print(f"Limited display to first 500 files")
+                return tsv_files
+            else:
+                return ["No Exomiser result files found"]
+                
         except Exception as e:
             print(f"Error listing Exomiser files: {str(e)}")
             # If there's an error, return a small list of common files
-            return ["PMID_9312167_BII4-pheval_disease_result.tsv", "Please refresh when API connection is working"]
+            return ["PMID_9312167_BII4-pheval_disease_result.tsv", "Error listing files, please check paths"]
     
     # Function to handle chat interactions
     def process_chat(message: str, history: List[List[str]], selected_file: Optional[str] = None) -> str:
+        # First message and a file is selected - automatically do reranking
+        if not history and selected_file:
+            # Check if the user's first message is empty or just asking for help
+            if not message.strip() or message.strip().lower() in ["help", "hello", "hi"]:
+                # Create an automatic reranking request for the selected file
+                if comprehensive:
+                    prompt = f"Perform comprehensive analysis on Exomiser results from file: {selected_file}" 
+                else:
+                    prompt = f"Please rerank the Exomiser results from file: {selected_file}"
+                    
+                print(f"Auto-generating analysis request for {selected_file}")
+                result = run_sync(lambda: exomiser_agent.run_sync(prompt, deps=deps))
+                return result.data
+        
+        # For subsequent messages or if user provided specific instructions
         if selected_file:
             # If a file is selected, include it in the message
             if comprehensive:
@@ -97,12 +148,18 @@ def chat(
         gr.Markdown(f"# Exomiser Results Reranking Agent ({mode_text} Mode)")
         
         description = """
-        This assistant can rerank Exomiser disease results based on phenopacket data, 
-        with focus on excluded phenotypes, onset information, and phenotype frequency.
+        This assistant can rerank Exomiser disease results to improve diagnostic accuracy.
         
-        - Select a specific Exomiser result file from the dropdown
-        - Ask questions about the results or request reranking
-        - The agent will analyze the data using multiple integrated agents
+        ### How to use:
+        1. Select a specific Exomiser result file from the dropdown below
+        2. Just click Submit with an empty message to automatically rerank the results
+        3. Or ask specific questions about the results for more detailed analysis
+        
+        The analysis focuses on:
+        - Disease-phenotype compatibility
+        - Excluded phenotypes (when available)
+        - Age of onset information
+        - Phenotype frequency data
         """
         
         if comprehensive:
@@ -164,9 +221,14 @@ def chat(
                                 ]
                             )
                             
-                            # If a file was pre-selected, add a message to the interface prompting analysis
+                            # Add guidance for submitting analysis
                             if initial_message:
-                                gr.Markdown(f"**Auto-analysis will start when you click 'Submit'**: {initial_message}")
+                                gr.Markdown(f"""
+                                ### ✅ Auto-analysis ready
+                                
+                                File "{selected_file}" is selected. Just click **Submit** to analyze it, 
+                                or type a specific question and then Submit.
+                                """)
                         
                         with gr.TabItem("Analysis Results"):
                             analysis_output = gr.Markdown("Select a file and run comprehensive analysis to see results")
@@ -188,9 +250,14 @@ def chat(
                         # Remove value parameter which is not supported in older Gradio versions
                     )
                     
-                    # If a file was pre-selected, add guidance message
+                    # Add guidance for submitting analysis
                     if initial_message:
-                        gr.Markdown(f"**To analyze {selected_file}, click Submit with your first message or type your question and submit**")
+                        gr.Markdown(f"""
+                        ### ✅ Auto-analysis ready
+                        
+                        File "{selected_file}" is selected. Just click **Submit** to analyze it, 
+                        or type a specific question and then Submit.
+                        """)
         
         # Function to run comprehensive analysis
         if comprehensive:

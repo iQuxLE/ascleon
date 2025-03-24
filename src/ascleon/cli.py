@@ -260,6 +260,212 @@ def list(exomiser_path):
         import traceback
         click.echo(traceback.format_exc())
 
+
+@main.command()
+@click.option("--exomiser-path", help="Path to the directory containing Exomiser results", required=True)
+@click.option("--model", "-m", help="The model to use for analysis (default: gpt-4o)")
+def simple(exomiser_path, model):
+    """
+    Simple interactive Exomiser analysis with file selection.
+    
+    This command provides a streamlined workflow:
+    1. Lists all available Exomiser result files
+    2. Lets you select a file by number
+    3. Performs basic reranking using only the file's data
+    
+    No external dependencies (phenopackets, HPO data) are needed.
+    """
+    os.environ["EXOMISER_RESULTS_PATH"] = exomiser_path
+    if model:
+        os.environ["EXOMISER_MODEL"] = model
+    
+    try:
+        import csv
+        from pathlib import Path
+        
+        # Find Exomiser result files
+        results_path = Path(exomiser_path)
+        
+        # Check for pheval_disease_result or pheval_disease_results directories
+        pheval_paths = [
+            results_path / "pheval_disease_result",
+            results_path / "pheval_disease_results"
+        ]
+        
+        # Try each potential pheval directory
+        tsv_files = []
+        for pheval_path in pheval_paths:
+            if pheval_path.exists():
+                tsv_files = [f.name for f in pheval_path.glob("**/*.tsv") if f.is_file()]
+                if tsv_files:
+                    click.echo(f"Found {len(tsv_files)} files in {pheval_path}")
+                    break
+        
+        # If no pheval directories found or they're empty, look in base directory
+        if not tsv_files:
+            tsv_files = [f.name for f in results_path.glob("**/*.tsv") if f.is_file()]
+            if tsv_files:
+                click.echo(f"Found {len(tsv_files)} files in {results_path}")
+        
+        if not tsv_files:
+            click.echo("No Exomiser result files found.")
+            return
+        
+        # Display the file list with a maximum of 20 files per page
+        page_size = 20
+        total_pages = (len(tsv_files) + page_size - 1) // page_size
+        current_page = 1
+        
+        while True:
+            start_idx = (current_page - 1) * page_size
+            end_idx = min(start_idx + page_size, len(tsv_files))
+            
+            click.clear()
+            click.echo(f"\n=== Available Exomiser Files (Page {current_page}/{total_pages}) ===")
+            for i in range(start_idx, end_idx):
+                click.echo(f"{i+1}. {tsv_files[i]}")
+            
+            # Navigation options
+            click.echo("\nOptions:")
+            click.echo("- Enter a number to select a file")
+            if total_pages > 1:
+                click.echo("- Type 'n' for next page")
+                click.echo("- Type 'p' for previous page")
+            click.echo("- Type 'q' to quit")
+            
+            selection = click.prompt("Selection", type=str)
+            
+            if selection.lower() == 'q':
+                return
+            elif selection.lower() == 'n' and current_page < total_pages:
+                current_page += 1
+                continue
+            elif selection.lower() == 'p' and current_page > 1:
+                current_page -= 1
+                continue
+            
+            try:
+                file_idx = int(selection) - 1
+                if 0 <= file_idx < len(tsv_files):
+                    selected_file = tsv_files[file_idx]
+                    break
+                else:
+                    click.echo(f"Please enter a number between 1 and {len(tsv_files)}")
+                    click.pause()
+            except ValueError:
+                click.echo("Please enter a valid option")
+                click.pause()
+        
+        click.clear()
+        click.echo(f"\n=== Analyzing {selected_file} ===")
+        
+        # Find the file path
+        file_path = None
+        for pheval_path in pheval_paths:
+            if pheval_path.exists():
+                potential_path = pheval_path / selected_file
+                if potential_path.exists():
+                    file_path = potential_path
+                    break
+        
+        if not file_path:
+            # Try base directory
+            potential_path = results_path / selected_file
+            if potential_path.exists():
+                file_path = potential_path
+        
+        if not file_path or not file_path.exists():
+            # Try recursive search
+            matches = list(results_path.glob(f"**/{selected_file}"))
+            if matches:
+                file_path = matches[0]
+        
+        if not file_path or not file_path.exists():
+            click.echo(f"ERROR: Could not find {selected_file}")
+            return
+        
+        click.echo(f"Reading file from: {file_path}")
+        
+        # Read the file
+        results = []
+        with open(file_path, 'r') as f:
+            reader = csv.DictReader(f, delimiter='\t')
+            for row in reader:
+                results.append(dict(row))
+        
+        if not results:
+            click.echo(f"File {selected_file} is empty")
+            return
+        
+        # Display the original top results
+        click.echo("\n=== Original Disease Candidates ===")
+        for i, result in enumerate(results[:10], 1):
+            disease_name = result.get('disease_name', result.get('DISEASE_NAME', 'Unknown'))
+            disease_id = result.get('disease_identifier', result.get('DISEASE_ID', 'Unknown'))
+            score = result.get('score', result.get('COMBINED_SCORE', '0'))
+            
+            click.echo(f"{i}. {disease_name} ({disease_id}) - Score: {score}")
+        
+        # Prepare for reranking
+        click.echo("\nPreparing for reranking analysis...")
+        
+        from ascleon.agents.exomiser.exomiser_config import get_config
+        from ascleon.agents.exomiser.exomiser_agent import exomiser_agent
+        from ascleon.utils.async_utils import run_sync
+        
+        # Create agent dependencies
+        deps = get_config()
+        
+        # Extract patient ID from the filename (typically starts with PMID)
+        patient_parts = selected_file.split('_')
+        patient_id = patient_parts[0]
+        if len(patient_parts) > 1:
+            patient_id += "_" + patient_parts[1]
+        
+        # Create a prompt for basic reranking
+        reranking_prompt = f"""
+        Please analyze the Exomiser results for patient ID "{patient_id}" and provide a reranked list of disease candidates.
+        
+        Focus on:
+        1. Most likely diagnostic interpretation based solely on these results
+        2. Any diseases that might be incorrectly ranked due to missing information
+        3. Reasonable diagnostic tests that could help differentiate top candidates
+        
+        The original top 10 candidates from Exomiser are:
+        """
+        
+        # Add the candidate diseases to the prompt
+        for i, result in enumerate(results[:10], 1):
+            disease_name = result.get('disease_name', result.get('DISEASE_NAME', 'Unknown'))
+            disease_id = result.get('disease_identifier', result.get('DISEASE_ID', 'Unknown'))
+            score = result.get('score', result.get('COMBINED_SCORE', '0'))
+            
+            reranking_prompt += f"\n{i}. {disease_name} ({disease_id}) - Score: {score}"
+        
+        # Run the reranking
+        click.echo("Analyzing with AI (this may take a moment)...")
+        try:
+            result = run_sync(lambda: exomiser_agent.run_sync(reranking_prompt, deps=deps))
+            
+            # Display the reranking result
+            click.echo("\n=== Reranking Analysis ===")
+            click.echo(result.data)
+            
+            # Ask if the user wants to analyze another file
+            if click.confirm("\nWould you like to analyze another file?"):
+                # Recursive call to start over
+                return simple(exomiser_path, model)
+            
+        except Exception as e:
+            click.echo(f"ERROR during reranking: {str(e)}")
+            import traceback
+            click.echo(traceback.format_exc())
+            
+    except Exception as e:
+        click.echo(f"ERROR: {str(e)}")
+        import traceback
+        click.echo(traceback.format_exc())
+
 @main.command()
 @click.option("--exomiser-path", help="Path to the directory containing Exomiser results", required=True)
 @click.argument("filename", required=True)

@@ -33,11 +33,30 @@ pip install -e .
 ## Quick Start
 
 ```bash
-# Run with UI
-ascleon exomiser --exomiser-path /path/to/exomiser_results --phenopackets-path /path/to/phenopackets --ui
+# Run with UI - select from all available files
+ascleon exomiser --ui --exomiser-path data/exomiser_results/pheval_disease_results --phenopackets-path data/phenopackets
+
+# Analyze a specific file directly
+ascleon exomiser --ui --file PMID_10571775_KSN-II-1-pheval_disease_result.tsv --exomiser-path data/exomiser_results/pheval_disease_results --phenopackets-path data/phenopackets
+
+# List all available Exomiser result files
+ascleon exomiser list --exomiser-path data/exomiser_results/pheval_disease_results
+
+# Simple view of an Exomiser file without using the AI agent
+ascleon exomiser simple-view --exomiser-path data/exomiser_results/pheval_disease_results PMID_10571775_KSN-II-1-pheval_disease_result.tsv
 
 # Run comprehensive analysis with OMIM and Literature integration
-ascleon exomiser --comprehensive --omim --literature --exomiser-path /path/to/exomiser_results --phenopackets-path /path/to/phenopackets --ui
+ascleon exomiser --comprehensive --omim --literature --exomiser-path data/exomiser_results/pheval_disease_results --phenopackets-path data/phenopackets --ui
+```
+
+You can also use the `analyze` command for direct command-line analysis:
+
+```bash
+# Run basic analysis from the command line
+ascleon exomiser analyze --exomiser-path data/exomiser_results/pheval_disease_results --phenopackets-path data/phenopackets PMID_10571775_KSN-II-1-pheval_disease_result.tsv
+
+# Run comprehensive analysis from the command line
+ascleon exomiser analyze --comprehensive --exomiser-path data/exomiser_results/pheval_disease_results --phenopackets-path data/phenopackets PMID_10571775_KSN-II-1-pheval_disease_result.tsv
 ```
 
 ## Documentation
@@ -67,3 +86,14 @@ python download_sample_data.py
 # - Exomiser TSV files → data/exomiser_results/
 # - Phenopacket JSON files → data/phenopackets/
 ```
+
+### File Matching
+
+Ascleon intelligently matches Exomiser result files with their corresponding phenopackets using multiple strategies:
+
+1. **PMID Matching**: Files with patterns like `PMID_12345678` will be matched with phenopackets containing the same PMID
+2. **Direct Name Matching**: Searches for phenopackets with similar filenames
+3. **Partial Matching**: Uses parts of the filename to find potential matches
+4. **Recursive Search**: If needed, searches all subdirectories for possible matches
+
+For best results, keep your phenopackets in the specified phenopackets directory with consistent naming patterns.
